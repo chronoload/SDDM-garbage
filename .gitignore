@@ -2,3 +2,6 @@ __pycache__/
 *.pyc 
 .ipynb_checkpoints/ 
 *.egg-info/
+docs/devo-project/verify/curriculum.json 
+docs/devo-project/verify/ckpt.json 
+*.ckpt.json
