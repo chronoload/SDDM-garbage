@@ -625,7 +625,8 @@ class DefaultHigherBrain(HigherBrain):
         每次分发前清空事件队列，避免历史事件累积。
         """
         self.dispatcher.event_queue = []  # 清空队列
-        events = self.dispatcher.dispatch(signal, source_tag)
+        # T1: 走边批向量化路径（内部自适应回退：小边数走 loop，语义逐位等价）
+        events = self.dispatcher.batched_dispatch(signal, source_tag)
         # --- 解耦扩展层（单一咽喉点：三条 dispatch 调用路径都经过这里）---
         if self.attention is not None:
             events = self.attention.modulate(events, query=signal)

@@ -108,6 +108,14 @@ class MyelinSheath:
     # {相位名: 累计 Δgain}，相位名见 DevelopmentalSystem.step_sleep
     sleep_phase_gain: dict = field(default_factory=dict)
 
+    # --- e-prop 资格迹（T3：髓鞘链深度信用的地基）---
+    #
+    # E_j ← decay·E_j + contribution_j。瞬时贡献只在传输当下存在，
+    # 而 RPE（世界裁定）延迟到来——elig 让"当时传输过"的通路在
+    # RPE 到达时仍能按残迹分账。链 A→B→C 的深度信用由此可能：
+    # 上游通路因下游有用而在延迟裁定中保留资格。
+    elig: float = 0.0
+
     # --- 新生儿豁免期（必需，非可选优化）---
     #
     # **为什么必须有**：新通路初始增益较低（见
@@ -1321,6 +1329,46 @@ class MyelinSheathRegistry:
             ),
         }
 
+    # ---------- e-prop 资格迹（T3） ----------
+
+    def update_eligibility(self, contributions: dict, decay: float = 0.9,
+                           clamp: float = 5.0) -> int:
+        """推进资格迹：E_j ← decay·E_j + contribution_j
+
+        Args:
+            contributions: 本步 {sheath_key: 贡献}（pathway_contributions 输出）
+            decay: 迹衰减（0.9 ≈ 覆盖约 10 步的传输-RPE 延迟）
+            clamp: 迹幅值界（防正反馈失控——防发散教义）
+
+        Returns:
+            被更新的髓鞘数。
+        """
+        for s in self._sheaths.values():
+            s.elig = max(-clamp, min(clamp, s.elig * decay))
+        for key, c in contributions.items():
+            s = self._sheaths.get(key)
+            if s is None:
+                continue
+            s.elig = max(-clamp, min(clamp, s.elig + float(c)))
+        return len(contributions)
+
+    def apply_eprop(self, rpe: float, lr: float = 0.05) -> int:
+        """RPE 到来：按资格迹分账 gain（三因子的第三因子 × 迹）
+
+        Δgain_j = lr · RPE · E_j，钳位 [0, GAIN_MAX]。
+
+        Returns:
+            被更新的髓鞘数。
+        """
+        n = 0
+        for s in self._sheaths.values():
+            if abs(s.elig) < 1e-9 or abs(rpe) < 1e-9:
+                continue
+            s.gain = max(0.0, min(s.GAIN_MAX,
+                                  s.gain + lr * float(rpe) * s.elig))
+            n += 1
+        return n
+
     def capacity_report(self) -> dict:
         """容量诊断——监控"只有衰减、无硬约束"下的自适应预算是否发散
 
@@ -1513,6 +1561,37 @@ class SignalDispatcher:
             "ok": 0, "no_sheath": 0, "no_target": 0,
             "out_of_range": 0, "no_source": 0, "shape": 0,
         }
+        # --- T2: 跨步事件队列（delay 一等公民 / 内生同步地基）---
+        #
+        # cross_step=False（默认）：事件当步结算——现有语义逐位保留。
+        # cross_step=True：delay>0.5 的传输事件跨帧存活，挂在 self.pending，
+        # 在 arrival_tick = 发出tick + delay 时进入彼时的结算。
+        # 逻辑时钟 self._tick 由 :meth:`tick` 驱动（每系统步一次，由
+        # system.step_awake 调用）。
+        self.cross_step: bool = False
+        self.pending: list[SignalEvent] = []
+        self._tick: int = 0
+
+    def tick(self) -> None:
+        """推进分发器逻辑时钟（每系统步一次）"""
+        self._tick += 1
+
+    def _apply_cross_step(self, events: list[SignalEvent],
+                          t: float) -> list[SignalEvent]:
+        """cross_step 模式：分离当期到期事件与挂起事件
+
+        到期事件并入当期事件流。cross_step=False 时原样直通（现有语义）。
+        """
+        if not self.cross_step:
+            return events
+        horizon = t + 0.5
+        due = [e for e in events if e.arrival_time <= horizon]
+        defer = [e for e in events if e.arrival_time > horizon]
+        still = [p for p in self.pending if p.arrival_time > horizon]
+        due += [p for p in self.pending if p.arrival_time <= horizon]
+        # 新事件的未到期者必须入队挂起（否则慢通路永远到不了——实测教训）
+        self.pending = still + defer
+        return due
 
     # ---------- 历史缓冲 ----------
 
@@ -1647,6 +1726,7 @@ class SignalDispatcher:
         self.event_queue = []
         # 推进源信号历史缓冲（delay 对齐度需要回溯）
         self.push_history()
+        t_eff = self._tick if self.cross_step else t
 
         # 从所有激活的神经元分发
         for nid, neuron in self.neurons.items():
@@ -1679,7 +1759,7 @@ class SignalDispatcher:
                     if src_n != nid or src_ch != ch:
                         continue
                     sh = self.sheaths.get(key)
-                    arrival = t + conn.effective_delay(sh)
+                    arrival = t_eff + conn.effective_delay(sh)
                     transmitted = self._scatter_to_global(
                         output, bounds.get(src_ch), dst_ch, conn.effective_gain(sh))
                     event = SignalEvent(
@@ -1693,8 +1773,11 @@ class SignalDispatcher:
                     )
                     self.event_queue.append(event)
 
+        # 跨步事件队列：延迟事件挂起，到期者并入当期（cross_step 模式）
+        events = self._apply_cross_step(self.event_queue, t_eff)
         # 按到达时间排序（时序竞争基础）
-        self.event_queue.sort(key=lambda e: e.arrival_time)
+        events.sort(key=lambda e: e.arrival_time)
+        self.event_queue = events
         return self.event_queue
 
     def resolve_triggers(self, threshold: float,
@@ -1808,6 +1891,7 @@ class SignalDispatcher:
         self._base_time = t
         self.event_queue = []
         self.push_history()
+        t_eff = self._tick if self.cross_step else t
 
         if self.port_layout is None or self.global_dim is None:
             return self.dispatch(signal, source_tag, t=t)   # 退回旧路径
@@ -1904,7 +1988,7 @@ class SignalDispatcher:
         for i, (row, s0, e0, g, delay, (doff, dsize), key, dn, dc) in \
                 enumerate(edges):
             events.append(SignalEvent(
-                arrival_time=t + delay,
+                arrival_time=t_eff + delay,
                 target_neuron=dn,
                 channel=dc,
                 data=Z[i],
@@ -1912,6 +1996,7 @@ class SignalDispatcher:
                 origin_neuron=key[0],
                 sheath_key=key,
             ))
+        events = self._apply_cross_step(events, t_eff)
         events.sort(key=lambda e: e.arrival_time)
         self.event_queue = events
         return events

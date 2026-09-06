@@ -54,6 +54,17 @@
      "run": "C:\\Users\\qu\\anaconda3\\python.exe verify_ledgers.py",
      "expected": "PASS",
      "status": "open"
+    },
+    {
+     "id": 4,
+     "ord": 4,
+     "text": "batched_dispatch 接入主路径(higher_brain.dispatch_signal), 自适应回退保证小E行为不变",
+     "action": "implement",
+     "code": "",
+     "lang": "",
+     "run": "",
+     "expected": "",
+     "status": "open"
     }
    ]
   },

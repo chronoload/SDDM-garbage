@@ -62,6 +62,7 @@ class DevelopmentalSystem:
         spike_threshold: float = 0.2,
         spike_decay: float = 0.3,
         spike_refractory: int = 1,
+        eprop: bool = False,
     ):
         """
         Args:
@@ -238,6 +239,8 @@ class DevelopmentalSystem:
         self.higher_brain.sheath_registry.protection_cost = protection_cost
         # 信息饱和度触发分裂（协同 C）
         self.saturation_split = saturation_split
+        # T3: e-prop 资格迹（髓鞘链深度信用）——RPE 按 elig 分账
+        self.eprop_enabled = bool(eprop)
         # 承载力预算随自回归误差伸缩（协同 E）
         self.adaptive_budget = adaptive_budget
         self.higher_brain.sheath_registry.adaptive_budget = adaptive_budget
@@ -525,6 +528,8 @@ class DevelopmentalSystem:
         """
         self.step_count += 1
         self.mode = SystemMode.AWAKE
+        # T2: 推进分发器逻辑时钟（跨步事件队列的时间基准）
+        self.higher_brain.dispatcher.tick()
 
         # 1. 读取入端口（或用 external_inputs）
         #    注意：原始信号保持物理单位，归一化只在进入发育网络时进行
@@ -607,6 +612,9 @@ class DevelopmentalSystem:
                     + (1.0 - self.relief_momentum) * self._pending_relief
                 )
                 self._pending_relief = None
+                # T3: e-prop——RPE 到来，按资格迹给髓鞘分账（深度信用）
+                if self.eprop_enabled:
+                    self.higher_brain.sheath_registry.apply_eprop(rpe)
                 # ① 调制自回归学习的强度
                 lr_t = lr_t * (1.0 + self.relief_gain * rpe)
                 # ② **RPE 直接驱动学习**（真正的第三因子）
@@ -804,6 +812,10 @@ class DevelopmentalSystem:
         died = 0
         if feedback is not None:
             contributions = pathway_contributions(events, feedback.residual)
+            # T3: 资格迹推进——瞬时贡献沉淀为持久 elig（延迟 RPE 可分账）
+            if self.eprop_enabled and contributions:
+                self.higher_brain.sheath_registry.update_eligibility(
+                    contributions)
             # 注意力键的局部学习：c_j · q（query 由 attention.modulate 缓存）。
             # 解耦：只动 attention 自己的键，W / 髓鞘 / 衰减一概不碰。
             if (self.higher_brain.attention is not None
