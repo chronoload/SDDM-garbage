@@ -1,0 +1,150 @@
+{
+ "plan": {
+  "id": "20260906_髓鞘系统AGI化路线-向量化-事件队列-深度-多肢体-世界桥",
+  "title": "髓鞘系统AGI化路线：向量化/事件队列/深度/多肢体/世界桥",
+  "goal": "按macdev纪律推进：GPU向量化解锁沉积物阅读与基准规模；跨步事件队列+e-prop实现内生同步与髓鞘深度；多肢体爬虫脑与Three.js/Minecraft世界桥；跨模态benchmark对接",
+  "arch": "",
+  "stack": "",
+  "global_constraints": "",
+  "status": "open",
+  "created_at": "2026-09-06 14:40:45"
+ },
+ "tasks": [
+  {
+   "id": 1,
+   "title": "T1 边批向量化",
+   "detail": "Modify: mcp/developmental/myelin.py(SignalDispatcher.dispatch/_scatter_to_global)。逐边Python循环改堆叠张量散射；验收=batched与loop逐位等价+每步耗时降一个量级",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": [
+    {
+     "id": 1,
+     "ord": 1,
+     "text": "写批处理散射等价测试(docs/devo-project/verify/test_batched_dispatch.py): 同一训练后脑, batched路径与loop路径事件逐位等价",
+     "action": "test",
+     "code": "",
+     "lang": "",
+     "run": "C:\\Users\\qu\\anaconda3\\python.exe docs\\devo-project\\verify\\test_batched_dispatch.py",
+     "expected": "FAIL",
+     "status": "open"
+    },
+    {
+     "id": 2,
+     "ord": 2,
+     "text": "实现SignalDispatcher.batched_scatter: 边结构(局部切片,gain,dst偏移)预计算堆叠, 一次张量散射生成事件",
+     "action": "implement",
+     "code": "",
+     "lang": "",
+     "run": "",
+     "expected": "",
+     "status": "open"
+    },
+    {
+     "id": 3,
+     "ord": 3,
+     "text": "回归: verify_attention_spikes与verify_ledgers行为不退化, 每步耗时记录对比",
+     "action": "test",
+     "code": "",
+     "lang": "",
+     "run": "C:\\Users\\qu\\anaconda3\\python.exe verify_ledgers.py",
+     "expected": "PASS",
+     "status": "open"
+    },
+    {
+     "id": 4,
+     "ord": 4,
+     "text": "batched_dispatch 接入主路径(higher_brain.dispatch_signal), 自适应回退保证小E行为不变",
+     "action": "implement",
+     "code": "",
+     "lang": "",
+     "run": "",
+     "expected": "",
+     "status": "open"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "title": "T2 跨步事件队列",
+   "detail": "Modify: mcp/developmental/myelin.py(SignalDispatcher)。事件跨帧存活，t+delay步到达参与共发射；验收=delay探索非平凡收敛、内生同步可跑",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  },
+  {
+   "id": 3,
+   "title": "T3 e-prop通路资格迹",
+   "detail": "Modify: mcp/developmental/myelin.py+selection.py。髓鞘E<-lambda*E+transmitted，RPE按E分账；验收=两层任务链式信用分配显著优于瞬时贡献",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  },
+  {
+   "id": 4,
+   "title": "T4 多肢体爬虫脑",
+   "detail": "Modify: mcp/developmental/reptilian.py+新建baby_multilimb.py。三肢体并行+协同需求世界；验收=协同行为出现且geometry非对称联通",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  },
+  {
+   "id": 5,
+   "title": "T5 Three.js/Minecraft世界桥",
+   "detail": "Create: mcp/developmental/builtin/sandbox_bridge.py+web前端。HTTP/WS暴露reset/step/observe/action；验收=爬虫脑经桥学会任务且cycle_coherence>0",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  },
+  {
+   "id": 6,
+   "title": "T6 跨模态benchmark对接",
+   "detail": "Create: bench/。调研选型后适配肢体接口；验收=至少一个已发表基准可跑且成绩可对照",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  },
+  {
+   "id": 7,
+   "title": "T7 重放资料扩展",
+   "detail": "Modify: deposit_reader.py。图片扫视/电影帧差/PDF双信道；验收=同一架构不改即可读三类沉积物",
+   "files": "",
+   "req_ref": "",
+   "defect_ref": "",
+   "interfaces": "",
+   "status": "open",
+   "review_status": "pending",
+   "review_findings": "",
+   "steps": []
+  }
+ ]
+}
