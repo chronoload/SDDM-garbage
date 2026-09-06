@@ -135,6 +135,96 @@ class ImageDeposit:
         return {"lang"}
 
 
+class ImageDepositPC:
+    """预测编码版图片沉积物（Rao & Ballard 1999 / Hosoya 2005 的适配）
+
+    学院派borrowing：
+    - **中心-surround 预测**：当前 patch 的亮度由已访问邻域（上/左邻居
+      + 运行均值）预测——LGN center-surround 的离散化；
+    - **编码创新量而非原值**：token = 预测残差 δ 的压扩量化
+      （Barlow：编码不可预测的成分，冗余由预测去除）；
+    - **压扩量化**（μ-law 同族）：|δ| 用 sqrt 压扩——小残差处分辨率高，
+      符合自然图像残差的重尾分布。
+
+    可学信号：平滑区 δ≈0（可预测），块边界 δ 大且方向一致
+    （从上一 patch 的创新 token 可预测下一创新的方向）——
+    相比 v1（原值等级，majority 0.625 平凡支配），创新量的
+    条件结构才是真正的学习信号。
+    """
+
+    LEVELS = 16
+    PATCH = 4
+
+    def __init__(self, source=None, seed=0, grid=32):
+        img = ImageDeposit(source=source, seed=seed, grid=grid).img
+        self.img = img
+        self.n_patch = grid // self.PATCH
+        # 预计算全部 patch 均值与 δmax（沉积物侧归一化，合法：
+        # 运行统计量族，同 normalizer 教义）
+        means = np.zeros((self.n_patch, self.n_patch))
+        for r in range(self.n_patch):
+            for c in range(self.n_patch):
+                means[r, c] = img[r * self.PATCH:(r + 1) * self.PATCH,
+                                  c * self.PATCH:(c + 1) * self.PATCH].mean()
+        self.means = means
+        self.delta_max = max(1e-6, float(np.abs(
+            means - means.mean()).max()) * 1.5)
+        self.last_utter = None
+        self.patch_idx = 0
+        self._mu = float(means.mean())
+
+    def _surround_pred(self, r, c):
+        """中心-surround：已访问邻居（上/左）+ 运行均值的预测"""
+        preds = [self._mu]
+        if r > 0:
+            preds.append(self.means[r - 1, c])
+        if c > 0:
+            preds.append(self.means[r, c - 1])
+        return float(np.mean(preds))
+
+    def _quantize(self, delta):
+        """压扩量化：sqrt 压扩的对称 16 级（含 δ=0 级）"""
+        half = self.LEVELS // 2
+        x = np.clip(abs(delta) / self.delta_max, 0, 1)
+        step = int(round(np.sqrt(x) * (half - 1)))
+        return half + (step if delta >= 0 else -step)
+
+    def cur_token(self):
+        r, c = divmod(self.patch_idx, self.n_patch)
+        delta = self.means[r, c] - self._surround_pred(r, c)
+        return self._quantize(delta)
+
+    def cur_patch(self):
+        r, c = divmod(self.patch_idx, self.n_patch)
+        return self.img[r * self.PATCH:(r + 1) * self.PATCH,
+                        c * self.PATCH:(c + 1) * self.PATCH].ravel()
+
+    def _advance(self):
+        r, c = divmod(self.patch_idx, self.n_patch)
+        # 运行均值更新（Hosoya 式自适应：统计量跟随最近输入）
+        self._mu = 0.99 * self._mu + 0.01 * self.means[r, c]
+        self.patch_idx = (self.patch_idx + 1) % (self.n_patch ** 2)
+
+    def observe(self):
+        V = self.LEVELS
+        P = self.PATCH * self.PATCH
+        D = P + V + V
+        v = np.zeros(D)
+        v[:P] = self.cur_patch()
+        v[P + self.cur_token()] = 1.0
+        if self.last_utter is not None:
+            v[P + V + self.last_utter] = 1.0
+        return v
+
+    def port(self):
+        V = self.LEVELS
+        P = self.PATCH * self.PATCH
+        return {"vis": (0, P), "disp": (P, V), "lang": (P + V, V)}, P + V + V
+
+    def output_channels(self):
+        return {"lang"}
+
+
 # ---------------------------------------------------------------------------
 # 电影：合成物理世界（弹球）+ 帧差 event 信道，预测下一帧象限
 # ---------------------------------------------------------------------------
