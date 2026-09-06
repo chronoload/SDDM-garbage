@@ -55,6 +55,123 @@ knitr::opts_chunk$set(echo = TRUE, python.reticulate = FALSE)
 
 **脉冲编码（解耦）**。通路级漏积分膜：$m_j \leftarrow \gamma m_j + \|x_j\|$，过阈发尖峰、清零、进入不应期；胞体保持速率编码。尖峰事件携带分级载荷，局部信用分配无需改动。这使髓鞘的 delay 轴获得真实作用对象——到达时刻决定膜积分能否在重合窗口内叠加，闭合"选择作用于时间"的回路。
 
+# 方法：数学形式与推导
+
+## 记号
+
+全局信号 $x_t \in \mathbb{R}^D$（$D=\sum$信道维度）；神经元 $n$ 的权重 $W_n$（活跃维度方阵）；髓鞘 $j=(n_{src}, ch_{src}, n_{dst}, ch_{dst})$，增益 $g_j$，延迟 $\tau_j$；未髓鞘轴突的传导特性固定为 $\tau=6.0$、$g=0.3$（髓鞘化是性能升级，不是连接存在的前提）。传输事件
+
+$$p_j = \mathrm{scatter}\big(g_j \cdot y_{n_{src}}[ch_{src}],\ ch_{dst}\big), \qquad y_n = W_n\,(g_{\dim}\odot x_t)$$
+
+其中 $g_{\dim}$ 是维度级增益（输入侧用进废退的执行载体），$\mathrm{scatter}$ 把源信道切片按目标信道偏移写入全局空间。到达时刻 $t_{arr} = t + \tau_j$。
+
+## 学习：三条局部通道
+
+**（a）自回归 delta rule。** 单层线性网络下，MSE 目标对 $W$ 的梯度有闭式解，故
+
+$$\Delta W = \eta_t\, r_t \otimes x_t, \qquad r_t = x_{t+1} - y_t, \qquad \eta_t = \frac{\eta_0}{1 + t/\tau_0}$$
+
+推导思路：残差对 $W$ 的梯度不需要链式法则——这是"无反向传播"仍能正确归因的原因（单层内每个权重对输出的影响是直接的）。两个修正来自实测：无约束更新会使 $\|W\|$ 爆炸（实测 $4.8\times10^7$），故加 Oja 式范数归一化 $W \leftarrow W\cdot(\|W\|_{target}/\|W\|)$ 与谱范数上限 3.0；固定 $\eta$ 在收敛后拟合噪声（实测余弦 0.76→0.37 回落），故衰减。
+
+**（b）通路贡献（NLMS 归一化）。** 把每条通路视为对输出的加性贡献，其对残差的局部梯度为
+
+$$c_j = \frac{\langle p_j,\ r_t\rangle}{\|x_t\|^2 + \varepsilon}$$
+
+$c_j>0$ 增厚、$c_j<0$ 加速衰减、$c_j\approx0$ 纯衰减。除以 $\|x\|^2$ 是 NLMS 步长自适应：数十条通路共享同一残差时，朴素梯度的稳定步长取决于总 Hessian 谱范数（$\approx E\cdot\mathbb{E}[x^2]$），实测 64 通路下数值爆炸，归一化后自稳。基于残差（而非目标）使系统自限：输出过头时同一通路的贡献自动转负。
+
+**（c）三因子规则。** 前两因子（Hebbian 资格）说明"共激活过"，第三因子说明"值不值得记住"：
+
+$$\Delta W = \eta\cdot \mathrm{RPE}\cdot (y_t \otimes x_t), \qquad \mathrm{RPE}_t = \mathrm{relief}_t - \overline{\mathrm{relief}}_t$$
+
+$\mathrm{relief}$ 是世界回报的驱动消解量（标量），$\overline{\mathrm{relief}}$ 为其 EMA（动量 0.9）。$\mathrm{RPE}$ 同时调制自回归学习率 $\eta_t \leftarrow \eta_t(1 + k_{relief}\cdot\mathrm{RPE})$。此通道存在的必要性是实测结论：语言信道的自回归残差恒趋于零（自己听到自己说的话，完美可预测），纯预测误差学不到控制（实测 competence $=-0.95$）。
+
+**（d）e-prop 资格迹（跨步信用）。** 瞬时贡献 $c_j$ 在传输当下存在，而 RPE 延迟到来。每条髓鞘维护标量迹
+
+$$E_j \leftarrow \gamma_j E_j + c_j, \qquad g_j \leftarrow \mathrm{clip}_{[0,G]}\big(g_j + \eta_{ep}\,\mathrm{RPE}\cdot E_j\big)$$
+
+衰减率取 RWKV-7 广义 delta rule 的逐通道 in-context 学习率思想：$\gamma_j = \gamma + (1-\gamma)\,g_j/G$——承重通路（$g_j$ 接近上限 $G=2.0$）的资格保留更久（实测承重迹保留 0.990 vs 低承重 0.902）。
+
+## 选择与结构
+
+**用进废退。** 髓鞘的存活条件是自适应预算而非硬约束：
+
+$$c_j\cdot u > \rho\,(1 - p_j) \qquad\Rightarrow\qquad g^* \propto \frac{\text{增量流}}{\rho}$$
+
+$\rho$ 同时是衰减率与选择阈值：$\rho\to 0$ 容量膨胀（实测接近全连接），$\rho$ 过大误杀弱信号通路（实测 0.05 时性能回落），最优区间 0.01–0.025。扫描依据见消融表。
+
+**共发射成边。** 连接由到达时序重合建立：$|t^{arr}_i - t^{arr}_j| < w$，窗口由延迟分布导出 $w = k\cdot\mathrm{std}(\{\tau_j\})$（$k=1$）。两级确认：共发射 1 次成**连接**，累计 3 次成**髓鞘**。跨信道成边需要源通道先"自证"——其贡献 EMA 超过阈值（0.3），冷启动期（髓鞘数 < 2）豁免、超过 10 关闭（双水位滞回）。
+
+**承载力。** 目标维度 $d$ 的总输入 $\mathrm{influx}(d) = \sum_j g_j(1+\lambda_p p_j)\,[dst_j = d]$，接收新连接的条件为 $\mathrm{influx} < B$；协同模式下 $B = B_0\min(3,\ 1+2\,\overline{\mathrm{err}})$——预测误差越大，允许的容量越大。保护的通路占用更多预算（权重 $1+\lambda_p p_j$），使"护住旧技能"有真实代价。
+
+## 仲裁：裁定权不在预测误差手里
+
+**死锁推导。** 反应式回路中 $x_{t+1}$ 依赖 $y_t$。若由预测误差裁定接管：高层输出错误 → 世界无响应 → 观测趋零 → 恒零输入的预测误差极低 → 进度上升 → $\lambda$ 升高 → 更彻底接管 → 世界死寂。实测满足率：反射 0.941 / 高层 0.001 / $\lambda$ 自适应 0.003。故裁定权必须来自反应侧：
+
+$$\mathrm{competence} = \frac{S_{high} - S_{reflex}}{\max(S_{reflex}, \varepsilon)}, \qquad \lambda = (1-u)\cdot\sigma\big(\beta(\mathrm{competence} - \theta)\big)$$
+
+$S$ 为两臂的满足度 EMA（影子期以 $\varepsilon$ 概率交替试验积累证据），接管可逆：$\mathrm{competence}$ 跌破 $-\theta_h$ 即收回。情境条件化版本按刺激簇分账 $\mathrm{competence}(ctx)$——混合难度任务中聚合标量会被难情境的失败稀释（实测简单技能得而复失）。
+
+**确认投票读出。** 幅值与正确性无关（实测：正确源票权 0.05、错误源 0.20，argmax 由错误的幅值决定）。读出改为
+
+$$\mathrm{cred}(src, tok) \leftarrow 0.85\,\mathrm{cred} + 0.15\,\mathbb{1}[\mathrm{hit}], \qquad y_{ch}[tok^\*] \mathrel{+}= \mathrm{cred}\big(src, tok^\*\big)$$
+
+每条跨模态通路对 payload 的 argmax token 投票，票权是该 (源, token) 转移的确认度 EMA（初始 0.5 中立）。这是一张由环境逐条确认的逻辑转移表。
+
+## 防发散与治理
+
+**张力张量。** 每条髓鞘的逐维负荷 $T_j \leftarrow \gamma_T T_j + |p_j \odot r_t|$（取模长：张力是负荷不是方向）。神经元回路张力 $\mathrm{load}(n) = \sum_{j \ni n} \overline{|T_j|}$。漂移治理：
+
+$$\Delta W = \rho_{drift}\cdot \frac{1}{1+\mathrm{load}(n)}\cdot \xi, \qquad \text{回滚}:\ \mathrm{err}_{post} > 1.1\,\mathrm{err}_{pre} + \epsilon \Rightarrow W \leftarrow W_{pre}$$
+
+语义分工：缩放治"在哪漂"（承重墙不漂），回滚治"承重处不许坏"（低张力回路的漂移是探索本身，一律放行）。
+
+**能量刹车。** $E_t = \|y_t\|^2$，$\overline{E}_t \leftarrow 0.99\overline{E} + 0.01 E_t$；$E_t > 6\overline{E}$ 时 $y \leftarrow 0.5\,y$ 并计数。实测长程触发 17–42 次/万步，均被压回。
+
+**稳态缩放（睡眠 NREM S3）。** $g_j \leftarrow g_j(1 - \beta(1-p_j))$——保护高的核心层几乎不动，活跃层优先衰减。
+
+**脉冲门控。** $m_j \leftarrow \gamma m_j + \|p_j\|$；$m_j \ge \theta$ 时放行（发尖峰）、清零、进入不应期 $r$ 步；阈下静默。参数 $\theta=0.2,\gamma=0.3,r=1$。
+
+## 参数全表
+
+| 参数 | 默认 | 作用 | 依据 |
+|---|---|---|---|
+| $\rho$ (decay_rate) | 0.01 | 选择阈值/衰减率 | 扫描最优 0.01–0.025；0→膨胀，0.05→误杀 |
+| use_scale | 0.5 | 贡献→增量缩放 | 与 $\rho$ 共同决定稳态 $g^\*$ |
+| autoreg_lr $\eta_0$ | 0.05 | delta rule 初始步长 | 2000 步长训：固定 lr 后期拟合噪声 |
+| autoreg_lr_tau $\tau_0$ | 5000 | 学习率衰减常数 | 罕见 token 的行需要足够步数 |
+| autoreg_w_norm | 1.1→3.0 | $W$ 范数目标 | 幅度匹配 $\approx 2.86/2.6$；3.0 提升 top1 |
+| drift_rate | 0.005 | 变异步长 | 必须 ≪ 选择强度 |
+| drift_interval | 50 | 变异周期 | 时间尺度分离 |
+| wiring_block | 50 | 成边 block | 每步成边致周转 11.5（实测空转） |
+| wire_threshold | 1 | 成边确认次数 | — |
+| myelination_threshold | 3 | 髓鞘化确认次数 | 闸门前置后两级差异被吸收 |
+| GRACE_PERIOD | 10 | 新生儿豁免 | 与 block 配合 1+1>2（精确率 1.0 / 召回 1.0） |
+| conn_starve_limit | 3000 | 连接饿死步数上限 | — |
+| AGE_PROBE / AGE_DEATH | 50 / 2000 | delay 探索 / 删除阈值 | — |
+| self_proof | 0.3 | 跨信道成边门控 | 门控使误差 0.147→0.086 |
+| exuberant_low / high | 2 / 10 | 冷启动豁免双水位 | — |
+| target_influx $B_0$ | 8.0 | 承载力目标流入 | 发放率截断 |
+| protection_cost $\lambda_p$ | 1.0 | 保护的预算代价 | 防保护无界累积 |
+| spike $\theta/\gamma/r$ | 0.2 / 0.3 / 1 | 脉冲阈值/漏电/不应期 | θ=0.1 仍损失票数（消融） |
+| attn $\alpha$ / lr | 1.0 / 0.05 | 调制深度 / 键学习率 | 键须方向归一化（累积封顶失效） |
+| eprop $\eta_{ep}$ / $\gamma$ | 0.05 / 0.9 | 资格迹分账 / 衰减 | γ_eff 随承重自适应 |
+| relief_gain | 1.0 | 三因子调制强度 | — |
+| $\beta$ / $\theta$ (λ 门控) | 8 / 0.05 | σ 斜率 / 毕业阈值 | — |
+| takeover_threshold | 0.05 | 接管/收回滞回 | 防 competence 抖动 |
+| explore_eps / background | 0.1 / 0.02 | 两档探索率 | 单档会永久锁死影子 |
+| min_samples | 20 | 接管最小证据 | — |
+| sleep_beta | 0.1 | 稳态缩放强度 | SHY |
+| preplay_consistency | 0.5 | 预演一致性阈值 | — |
+| seizure_ratio / damp | 6.0 / 0.5 | 能量刹车 | 防发散，非性能组件 |
+
+## 推导要点（为什么每条规则长成这样）
+
+1. **裁定因果对齐**：裁定信号与行动目标错位一步，学习退化为复述（实测 top1 钉死随机）——所有规则先问"信用配对是否因果"。
+2. **NLMS 而非朴素梯度**：多通路共享残差，步长必须按输入能量自适应。
+3. **衰减必须逐通路自适应**：均匀衰减对承重与非承重一视同仁，等于让重要通路先死。
+4. **预算制而非硬上限**：容量上界 = 增量流/ρ，随环境活跃度伸缩。
+5. **回滚探针无副作用**：探针不得更新 EMA/活动度，否则评估行为改变被评估对象。
+
 # 实验：超模态语法习得
 
 ## 任务

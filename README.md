@@ -45,6 +45,77 @@
 
 核心实现集中在 [`mcp/developmental/myelin.py`](mcp/developmental/myelin.py)（髓鞘/分发/共发射）、[`system.py`](mcp/developmental/system.py)（主循环）、[`neuron.py`](mcp/developmental/neuron.py)、[`selection.py`](mcp/developmental/selection.py)（选择信号）、[`attention.py`](mcp/developmental/attention.py)、[`spikes.py`](mcp/developmental/spikes.py)、[`geometry.py`](mcp/developmental/geometry.py)（跨模态几何分析）、[`persistence.py`](mcp/developmental/persistence.py)（脑序列化）。
 
+## 数学核心
+
+记号：$x_t \in \mathbb{R}^D$ 全局信号；髓鞘 $j$ 增益 $g_j$、延迟 $\tau_j$；传输 $p_j = g_j \cdot \mathrm{scatter}(y_{src}, ch_{dst})$；残差 $r_t = x_{t+1} - y_t$。完整推导见 [paper/preprint.Rmd](paper/preprint.Rmd) 的"方法"章。
+
+**学习（三条局部通道，无反向传播）**
+
+```
+自回归 delta rule:  ΔW = η_t · r_t ⊗ x_t,    η_t = η₀/(1 + t/τ₀),  ‖W‖ → W_target
+通路贡献 (NLMS):    c_j = ⟨p_j, r_t⟩ / ‖x_t‖²
+三因子:             ΔW = η · RPE · (y_t ⊗ x_t),   RPE = relief_t − EMA(relief)
+e-prop 资格迹:      E_j ← γ_j·E_j + c_j,          g_j += η_ep · RPE · E_j
+                    γ_j = γ + (1−γ)·g_j/GAIN_MAX   （RWKV-7 式承重自适应衰减）
+```
+
+**选择与结构**
+
+```
+存活条件:           c_j · use_scale > ρ · (1 − protection)     （自适应预算：g* ∝ 增量流/ρ）
+共发射成边:         |t_arr_i − t_arr_j| < w = std({τ});  1 次成连接, 3 次成髓鞘
+承载力:             influx(d) = Σ g_j(1+λ_p·p_j) < B = B₀·min(3, 1+2·EMA(err))
+```
+
+**仲裁（裁定权在反应侧，不在预测误差——实测死锁：λ 由误差裁定 → 世界死寂）**
+
+```
+competence = (S_high − S_reflex) / max(S_reflex, ε)      （情境条件化：按刺激簇分账）
+λ = (1−urgency)·σ(β·(competence − θ)),   β=8, θ=0.05,  接管可逆
+确认投票:  cred(src,tok) ← 0.85·cred + 0.15·1[hit];  读出按 cred 加权，幅值不参与
+```
+
+**防发散与治理**
+
+```
+张力张量:   T_j ← γ_T·T_j + |p_j ⊙ r_t|;   load(n) = Σ mean|T_j|
+漂移治理:   ΔW = ρ_drift·ξ/(1+load(n));     err_post > 1.1·err_pre ⇒ W 回滚
+能量刹车:   E_t > 6·EMA(E) ⇒ y ← 0.5·y     （癫痫的机制对应）
+脉冲门控:   m_j ← γ·m_j + ‖p_j‖;  m_j ≥ θ ⇒ 放行+不应期;  阈下静默
+稳态缩放:   g_j ← g_j·(1 − β·(1−protection))  （睡眠 NREM S3）
+```
+
+## 参数指南
+
+最重要的参数是 $\rho$（decay_rate）——它同时是衰减率与选择阈值：存活条件 `contribution·use_scale > ρ·(1−protection)`，总容量上界 ≈ 增量流/ρ。两端都失败：太小 → 噪声通路堆积；太大 → 误杀弱信号通路。实测最优 0.01–0.025。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| decay_rate (ρ) | 0.01 | 选择阈值；实测最优 0.01–0.025 |
+| use_scale | 0.5 | 贡献→增量缩放 |
+| autoreg_lr / tau | 0.05 / 5000 | delta rule 步长与衰减常数 |
+| autoreg_w_norm | 3.0 | W 范数目标（1.1→3.0 提升 top1） |
+| drift_rate / interval | 0.005 / 50 | 变异步长与周期（必须与选择分离） |
+| wiring_block | 50 | 成边 block（每步成边 → 周转空转 11.5） |
+| wire / myelination_threshold | 1 / 3 | 成边 / 髓鞘化确认次数 |
+| GRACE_PERIOD | 10 | 新生儿豁免期 |
+| conn_starve_limit | 3000 | 连接饿死上限 |
+| AGE_PROBE / AGE_DEATH | 50 / 2000 | delay 探索 / 删除阈值 |
+| self_proof | 0.3 | 跨信道成边门控 |
+| exuberant_low / high | 2 / 10 | 冷启动豁免双水位 |
+| target_influx / protection_cost | 8.0 / 1.0 | 承载力预算 |
+| spike θ / γ / refractory | 0.2 / 0.3 / 1 | 脉冲门控 |
+| attn depth / lr | 1.0 / 0.05 | 注意力调制 |
+| eprop lr / γ | 0.05 / 0.9 | 资格迹分账 / 衰减（γ 承重自适应） |
+| relief_gain | 1.0 | 三因子调制强度 |
+| λ 门控 β / θ | 8 / 0.05 | competence 斜率 / 阈值 |
+| takeover_threshold | 0.05 | 接管/收回滞回 |
+| explore_eps / background | 0.1 / 0.02 | 两档探索率（单档锁死影子） |
+| sleep_beta | 0.1 | 稳态缩放强度 |
+| seizure_ratio / damp | 6.0 / 0.5 | 能量刹车 |
+
+⚠ 以上默认值在特定实验环境扫出，换环境需重扫。按领域通行范式：手工设计形式，参数做敏感性分析或自动搜索。
+
 ## 快速开始
 
 ```bash
