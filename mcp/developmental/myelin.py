@@ -27,6 +27,8 @@ import random
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
+
 from torch import Tensor
 
 
@@ -1779,3 +1781,137 @@ class SignalDispatcher:
                 sheath.adapt_delay(group_arrival, self._base_time, lr=lr)
                 adjusted += 1
         return adjusted
+
+    # ------------------------------------------------------------------
+    # T1 边批向量化（macdev plan 20260906 任务 1）
+    # ------------------------------------------------------------------
+
+    def batched_dispatch(self, signal: Tensor, source_tag: str,
+                         t: float = 0.0) -> list[SignalEvent]:
+        """边批向量化分发：语义与 :meth:`dispatch` 逐位等价
+
+        把逐边 Python 循环（每条边创建一个 global_dim 张量 + 拷贝）改为
+        堆叠张量散射：边结构（局部切片、gain、目标偏移）一次性收进
+        索引矩阵，gather → 乘 gain → scatter 三步张量操作完成全部传输。
+        等价性与性能验证见
+        ``docs/devo-project/verify/test_batched_dispatch.py``。
+
+        神经元前向暂保持逐神经元（跨神经元 batch 属 T1 后续/CUDA 迁移）。
+        """
+        def _to_np_local(x):
+            if hasattr(x, "detach"):
+                return np.asarray(x.detach().cpu().numpy(), dtype=float)
+            if hasattr(x, "a"):
+                return np.asarray(x.a, dtype=float)
+            return np.asarray(x, dtype=float)
+
+        self._base_time = t
+        self.event_queue = []
+        self.push_history()
+
+        if self.port_layout is None or self.global_dim is None:
+            return self.dispatch(signal, source_tag, t=t)   # 退回旧路径
+
+        # 1) 神经元前向（与 dispatch 相同的激活语义）
+        outputs = {}
+        for nid, neuron in self.neurons.items():
+            if not neuron.alive or neuron.W is None:
+                continue
+            out = neuron.process(signal)
+            if out is not None:
+                outputs[nid] = out
+                for ch in neuron.unfolded:
+                    self.record_source(nid, ch, out)
+        if not outputs:
+            return []
+
+        # 2) 神经元输出堆叠（行 = 神经元，列 = 局部展开序，零填充）
+        nids = sorted(outputs.keys())
+        row_of = {nid: i for i, nid in enumerate(nids)}
+        lmax = max(int(o.numel()) for o in outputs.values())
+        stack_np = np.zeros((len(nids), lmax))
+        for nid, o in outputs.items():
+            a = _to_np_local(o)
+            stack_np[row_of[nid], :min(a.size, lmax)] = a.ravel()[:lmax]
+
+        # 3) 收集活跃边参数（O(E) 轻量标量循环，重活在下面的张量步）
+        edges = []
+        for (sn, sc, dn, dc), conn in self.connections.items():
+            n = self.neurons.get(sn)
+            if (n is None or sn not in outputs or dc not in self.port_layout):
+                continue
+            bounds = {c: (s0, e0) for c, s0, e0 in n._channel_bounds()}
+            if sc not in bounds:
+                continue
+            s0, e0 = bounds[sc]
+            sh = self.sheaths.get((sn, sc, dn, dc))
+            edges.append((
+                row_of[sn], s0, e0, float(conn.effective_gain(sh)),
+                float(conn.effective_delay(sh)),
+                self.port_layout[dc], (sn, sc, dn, dc), dn, dc))
+        if not edges:
+            return []
+        # 自适应回退：边数少时堆叠开销 > 循环开销（实测 E=3 时 0.4x），
+        # 阈值以下直接走 loop 路径——batched 的收益在大 E 处兑现。
+        if len(edges) < getattr(self, "batched_min_edges", 16):
+            return self.dispatch(signal, source_tag, t=t)
+
+        E = len(edges)
+        seg_max = max(e[2] - e[1] for e in edges)
+
+        # 4) gather：(E, seg_max) ← stack 平铺索引（-1 填充屏蔽）。
+        #    向量化数学用 numpy（shim 无 torch.full/arange，见 COVERED），
+        #    结果在末尾包回环境张量类型。
+        ix = np.full((E, seg_max), -1, dtype=np.int64)
+        dst_off = np.zeros(E, dtype=np.int64)
+        dst_size = np.zeros(E, dtype=np.int64)
+        gains = np.zeros(E)
+        for i, (row, s0, e0, g, delay, (doff, dsize), key, dn, dc) in \
+                enumerate(edges):
+            L = e0 - s0
+            ix[i, :L] = row * lmax + np.arange(s0, e0)
+            dst_off[i] = doff
+            dst_size[i] = dsize
+            gains[i] = g
+
+        stack_np = np.zeros((len(nids), lmax))
+        for nid, o in outputs.items():
+            a = _to_np_local(o)
+            stack_np[row_of[nid], :a.size] = a.ravel()[:lmax]
+        flat = stack_np.reshape(-1)
+        valid = ix >= 0
+        vals = np.where(valid, np.take(flat, np.clip(ix, 0, None)),
+                        0.0) * gains[:, None]
+
+        # 5) scatter：每条边写自己的 (global_dim,) 行（行内位置互不重复，
+        #    高级索引赋值安全）；越出目标信道宽度的尾部截断（与
+        #    _scatter_to_global 的 min(seg, size) 语义一致）
+        pos = np.tile(np.arange(seg_max), (E, 1))
+        write = valid & (pos < dst_size[:, None])
+        Z_np = np.zeros((E, self.global_dim))
+        rows_idx = np.repeat(np.arange(E), seg_max).reshape(E, seg_max)
+        didx = dst_off[:, None] + np.clip(pos, 0, np.maximum(dst_size[:, None] - 1, 0))
+        Z_np[rows_idx[write], didx[write]] = vals[write]
+
+        # 5.5) 包回环境张量类型（shim Tensor / torch Tensor 均支持
+        #      new_zeros 与 numpy 值的高级索引赋值）
+        first_out = next(iter(outputs.values()))
+        Z = first_out.new_zeros((E, self.global_dim))
+        Z[rows_idx[write], didx[write]] = vals[write]
+
+        # 6) 事件对象（轻量，逐边构造不可避免）
+        events = []
+        for i, (row, s0, e0, g, delay, (doff, dsize), key, dn, dc) in \
+                enumerate(edges):
+            events.append(SignalEvent(
+                arrival_time=t + delay,
+                target_neuron=dn,
+                channel=dc,
+                data=Z[i],
+                source_tag=source_tag,
+                origin_neuron=key[0],
+                sheath_key=key,
+            ))
+        events.sort(key=lambda e: e.arrival_time)
+        self.event_queue = events
+        return events
