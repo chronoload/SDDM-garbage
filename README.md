@@ -1,6 +1,8 @@
 # 髓鞘发育式学习系统（Myelination-style Developmental Learning System）
 
-# SHIT
+# [SHIT](./SHIT_zh.md)
+
+评述：我们对机器学习与人工智能的看法（[English](./SHIT.md)）。仓库名是故意的，内容是认真的。
 
 [English](./README_EN.md) | 中文
 

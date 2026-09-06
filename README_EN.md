@@ -1,6 +1,8 @@
 # Myelination-style Developmental Learning System
 
-# SHIT
+# [SHIT](./SHIT.md)
+
+Our critical essay on machine learning and artificial intelligence ([中文](./SHIT_zh.md)). The repo name is intentional; the content is serious.
 
 [English](./README_EN.md) | [中文](./README.md)
 
