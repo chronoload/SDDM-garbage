@@ -928,9 +928,10 @@ class DevelopmentalSystem:
         if feedback is not None:
             contributions = pathway_contributions(events, feedback.residual)
             # T3: 资格迹推进——瞬时贡献沉淀为持久 elig（延迟 RPE 可分账）
+            # adaptive=True: RWKV-7 式逐通路衰减（承重通路迹衰减更慢）
             if self.eprop_enabled and contributions:
                 self.higher_brain.sheath_registry.update_eligibility(
-                    contributions)
+                    contributions, adaptive=True)
             # T8: 张力张量推进——逐维度负荷（承重墙的度量）
             if self.drift_tension:
                 self.higher_brain.sheath_registry.update_tension(

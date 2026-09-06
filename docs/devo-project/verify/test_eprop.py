@@ -53,6 +53,19 @@ def main():
     reg.apply_eprop(rpe=1.0, lr=0.05)
     assert s0.gain > g_before, "延迟 RPE 仍应按残迹增厚"
 
+    # 3.5) RWKV-7 式自适应衰减：承重通路（gain 高）迹衰减更慢
+    s0.gain = s0.GAIN_MAX                    # 承重满格
+    s0.elig = 1.0
+    reg.update_eligibility({}, decay=0.9, adaptive=True)
+    elig_bearing = s0.elig
+    s0.gain = 0.05                           # 低承重
+    s0.elig = 1.0
+    reg.update_eligibility({}, decay=0.9, adaptive=True)
+    assert elig_bearing > s0.elig, \
+        f"承重通路迹应衰减更慢: 承重 {elig_bearing:.3f} " \
+        f"vs 低承重 {s0.elig:.3f}"
+    print(f"自适应衰减: 承重迹保留 {elig_bearing:.3f} vs 低承重 {s0.elig:.3f}")
+
     # 4) 语法任务回归：eprop 开启 500 步不崩、行为合理
     r = BG.run(seed=0, steps=500, use_attention=False, use_spikes=False,
                eprop=True)

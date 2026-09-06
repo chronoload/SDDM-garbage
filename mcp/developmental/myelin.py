@@ -1341,19 +1341,28 @@ class MyelinSheathRegistry:
     # ---------- e-prop 资格迹（T3） ----------
 
     def update_eligibility(self, contributions: dict, decay: float = 0.9,
-                           clamp: float = 5.0) -> int:
+                           clamp: float = 5.0,
+                           adaptive: bool = False) -> int:
         """推进资格迹：E_j ← decay·E_j + contribution_j
 
         Args:
             contributions: 本步 {sheath_key: 贡献}（pathway_contributions 输出）
             decay: 迹衰减（0.9 ≈ 覆盖约 10 步的传输-RPE 延迟）
             clamp: 迹幅值界（防正反馈失控——防发散教义）
+            adaptive: RWKV-7 式 in-context 学习率——承重通路（gain 高）
+                的迹衰减更慢：decay_eff = decay + (1−decay)·gain/GAIN_MAX。
+                学院派同源：RWKV-7 广义 delta rule 的逐通道可变衰减率
+                （arXiv:2503.14456），T4 技能保持的机制版。
 
         Returns:
             被更新的髓鞘数。
         """
         for s in self._sheaths.values():
-            s.elig = max(-clamp, min(clamp, s.elig * decay))
+            d_eff = decay
+            if adaptive and s.gain > 0:
+                d_eff = min(0.99, decay + (1.0 - decay)
+                            * (s.gain / max(1e-6, s.GAIN_MAX)))
+            s.elig = max(-clamp, min(clamp, s.elig * d_eff))
         for key, c in contributions.items():
             s = self._sheaths.get(key)
             if s is None:
