@@ -1,5 +1,7 @@
 # 髓鞘发育式学习系统（Myelination-style Developmental Learning System）
 
+# SHIT
+
 [English](./README_EN.md) | 中文
 
 这是一个面向 AGI 的发育式学习架构。它起于一个判断：网络结构不该由人来设定，而应当从学习中长出来。种子神经元在环境信号驱动下展开维度、共发射成边、髓鞘化、分化分裂；所有学习信号来自环境即时反馈——没有反向传播，没有标注，也没有预训练嵌入。

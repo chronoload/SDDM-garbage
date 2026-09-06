@@ -1,5 +1,7 @@
 # Myelination-style Developmental Learning System
 
+# SHIT
+
 [English](./README_EN.md) | [中文](./README.md)
 
 An AGI-oriented **developmental learning architecture**: structure is not a prerequisite but a *product* of learning. Seed neurons unfold dimensions under environment-driven signals, wire by co-firing, myelinate, differentiate and split. All learning signals come from immediate environment feedback — no backpropagation, no labels, no pretrained embeddings.
