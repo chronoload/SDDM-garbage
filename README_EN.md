@@ -137,12 +137,38 @@ In progress: Moving MNIST benchmark, Crafter integration, context-conditioned co
 
 ## References
 
-- Rao & Ballard 1999, *Predictive coding in the visual cortex*
-- Barlow 1961, *Possible principles underlying the transformations of sensory messages*
-- Fritzke 1995, *Growing Neural Gas* (edge-age correspondence)
-- Peng et al. 2025, *RWKV-7 "Goose"* (per-channel in-context learning rates)
-- Hosoya et al. 2005, *Dynamic predictive coding by the retina*
-- Sun et al., *Learning to (Learn at Test Time)*
+**Direct precedents and theoretical support**
+
+- Åström & Wittenmark (1973). On Self-Tuning Regulators. *Automatica* 9(2) — nearest precedent for signal-driven online learning
+- Brooks (1986). Subsumption Architecture — direct precedent for baseline-layer separation; this system adds the learning and memory it lacks
+- Conant & Ashby (1970). Every good regulator of a system must be a model of that system — basis for lazy dimension unfolding
+- Oja (1982) — mathematical form of weight-layer use/disuse
+- Tononi & Cirelli (2019). Sleep and synaptic down-selection — source of sleep homeostatic scaling
+- Asokan, Chhabria & Chakravarthy (2015). Adaptive myelination of temporal delays (CNS*2015 poster) — only direct precedent for myelin as a trainable quantity
+- Lefebvre et al. (2025). Myelin-induced gain control in nonlinear neural networks. *Communications Physics* — theory for the myelin gain axis
+
+**Learning-mechanism comparisons**
+
+- Fritzke (1995). Growing Neural Gas — correspondence for the edge-age mechanism
+- Rao & Ballard (1999). Predictive coding in the visual cortex — the academic formalization of our autoregressive-residual channel
+- Barlow (1961). Efficient coding hypothesis — common root of redundancy reduction and use/disuse dedup
+- Hosoya et al. (2005). Dynamic predictive coding by the retina — the canonical adaptive-statistics encoder
+- Hinton (2022). Forward-Forward — modern reference for local learning without backprop
+- Ding et al. Information-saturation structural developmental NN (CAAI TIT) — comparison for split timing and parent-child relations
+- Baxter & Levy (2019). Adaptive synaptogenesis network — comparison for autophagy/pruning
+
+**Continual-learning and sequence-modeling paradigms**
+
+- Peng et al. (2025). RWKV-7 "Goose" (arXiv:2503.14456) — per-channel in-context learning rates, adopted as adaptive decay
+- Sun et al. Learning to (Learn at Test Time) — state as test-time-trainable memory
+- Mamba-CL (arXiv:2411.15469) — selective gating as the forgetting controller
+
+**Benchmarks**
+
+- Crafter, MineDojo/MineStudio (embodied agents)
+- Moving MNIST (video prediction), CIFAR-10 (images, label-verdict protocol)
+
+The full 66-source literature survey with per-source verification notes is in [`docs/research/发育智能系统_相似研究调研.md`](docs/research/发育智能系统_相似研究调研.md) (Chinese).
 
 ## License
 
