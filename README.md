@@ -119,7 +119,9 @@ deposit_media.py       图片/电影沉积物适配（预测编码编码）
 unified_curriculum.py  统一词表持续课程
 devo_control.py        具身控制任务（不稳定系统 + 用进废退）
 mcp/developmental/builtin/sandbox_bridge.py  世界桥（HTTP JSON，Three.js 兼容）
-docs/devo-project/     macdev 产物：spec/plan/log/验证脚本（双轨）
+docs/devo-project/     macdev 产物：spec/plan/log（双轨）
+docs/devo-project/verify/  全部验证与诊断脚本（8 个 TDD 契约测试 +
+                       quant_audit 量化审计 + 历史实验脚本归档）
 paper/preprint.Rmd     arXiv 预印本（中文）
 ```
 

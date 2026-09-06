@@ -123,7 +123,9 @@ deposit_media.py       image/movie deposit adapters (predictive-coding encoding)
 unified_curriculum.py  unified-vocabulary continual curriculum
 devo_control.py        embodied control task (unstable system + use/disuse)
 mcp/developmental/builtin/sandbox_bridge.py  world bridge (HTTP JSON, Three.js-compatible)
-docs/devo-project/     macdev artifacts: specs/plans/logs/verification scripts (dual-track)
+docs/devo-project/     macdev artifacts: specs/plans/logs (dual-track)
+docs/devo-project/verify/  all verification & diagnostic scripts (8 TDD contract tests +
+                       quant_audit + archived experiment scripts)
 paper/preprint.Rmd     arXiv preprint draft (Chinese)
 ```
 

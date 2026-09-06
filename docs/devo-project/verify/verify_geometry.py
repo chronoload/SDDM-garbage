@@ -1,3 +1,4 @@
+sys.path.insert(0, r"C:\Users\qu\Desktop\devo_project")
 """几何对照：未训练 vs 训练后——超模态几何应当从无到有"""
 import numpy_torch_shim as shim
 shim.install()
