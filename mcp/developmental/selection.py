@@ -224,6 +224,14 @@ class DriveSatisfaction:
         self._n_reflex: int = 0
         self._n_high: int = 0
         self._last_controller: str = "reflex"
+        # --- 情境条件化 competence（感知建模护栏）---
+        #
+        # T4 实测病理：混合难度任务下，聚合标量 competence 被难情境的
+        # 失败稀释，高层在"世界模型证明自己行"的情境里也被收回控制权，
+        # 已学会的技能得而复失。修复：按感知情境（winner 神经元簇）
+        # 分账满足度——这是"自回归裁定蒸馏"教义在仲裁层的贯彻：
+        # 世界模型好的情境保留控制权，不被其他情境连坐。
+        self._ctx: dict = {}
         # --- 咨询台账：按**输出来源**（器官级 provenance）分账 ---
         #
         # 与 reflex/higher 二分臂正交：二分臂回答"影子期 vs 接管期谁
@@ -239,22 +247,21 @@ class DriveSatisfaction:
 
     # ---------- 探索调度 ----------
 
-    def should_explore(self, rng=None) -> bool:
+    def should_explore(self, rng=None, sufficient: Optional[bool] = None) -> bool:
         """本步是否让高层真正接管（探索性试验）
 
-        ⚠ 两档探索率，不能只有一档（实测缺陷）：
-
-        初版写成"证据不足才探索，够了就停"。后果是**探索在第 20 步
-        就永久停止**（min_samples=20 即满足），而此时高层还很弱
-        （实测 sat_high 仅 0.124）。此后即使高层通过学习变强，也
-        永远没有机会再证明自己 —— 被锁死在影子模式里。
-
-        修正为标准的 ε-greedy 两档：
+        两档 ε-greedy（实测：只有一档会在证据刚够时永久停止探索）：
           · 证据不足 → 高探索率 eps（快速积累初始证据）
-          · 证据充分 → 低背景探索率 eps_background（持续监控，
-            高层变强后能被发现，环境变化后也能被察觉）
+          · 证据充分 → 低背景探索率 eps_background（持续监控）
+
+        Args:
+            sufficient: 情境级证据充分性覆盖（情境条件化模式用——
+                未证实的情境保持高探索率，否则证据饥饿会把它锁死在影子里）。
+                None → 用全局充分性。
         """
-        rate = self.eps if not self.has_sufficient_evidence else self.eps_background
+        enough = self.has_sufficient_evidence if sufficient is None \
+            else sufficient
+        rate = self.eps if not enough else self.eps_background
         if rate <= 0.0:
             return False
         if rng is None:
@@ -264,12 +271,14 @@ class DriveSatisfaction:
 
     # ---------- 观测 ----------
 
-    def observe(self, satisfaction: float, controller: str) -> None:
+    def observe(self, satisfaction: float, controller: str,
+                context: Optional[int] = None) -> None:
         """记录一次满足度观测
 
         Args:
             satisfaction: 本步内在驱动被满足的程度 ∈ [0, 1]
             controller: 本步实际的控制者，``"reflex"`` 或 ``"higher"``
+            context: 感知情境（winner 神经元簇）。None = 不入情境账。
         """
         if satisfaction is None:
             return
@@ -287,6 +296,20 @@ class DriveSatisfaction:
                 else m * self._sat_reflex_ema + (1 - m) * satisfaction
             )
         self._last_controller = controller
+        # 情境账本（感知建模护栏）
+        if context is not None:
+            e = self._ctx.setdefault(context, {
+                "sat_high": None, "sat_reflex": None,
+                "n_high": 0, "n_reflex": 0})
+            if controller == "higher":
+                e["n_high"] += 1
+                e["sat_high"] = (satisfaction if e["sat_high"] is None
+                                 else m * e["sat_high"] + (1 - m) * satisfaction)
+            else:
+                e["n_reflex"] += 1
+                e["sat_reflex"] = (satisfaction if e["sat_reflex"] is None
+                                   else m * e["sat_reflex"]
+                                   + (1 - m) * satisfaction)
         # 咨询台账：无论控制臂如何，都按输出来源记一笔
         self.observe_source(controller, satisfaction)
 
@@ -333,9 +356,17 @@ class DriveSatisfaction:
         return (self._n_reflex >= self.min_samples
                 and self._n_high >= self.min_samples)
 
+    def has_sufficient_for(self, context) -> bool:
+        """情境级证据充分性（情境条件化接管用）"""
+        e = self._ctx.get(context) if context is not None else None
+        if e is None:
+            return self.has_sufficient_evidence
+        return (e["n_reflex"] >= self.min_samples
+                and e["n_high"] >= self.min_samples)
+
     @property
     def competence(self) -> float:
-        """高层相对反射的**胜任度**
+        """高层相对反射的**胜任度**（全局聚合——会被异质情境稀释，见 _ctx）
 
         > 0 表示高层让世界更接近想要的状态，是高层接管的**唯一凭据**。
         证据不足时返回 0（不允许接管）。
@@ -345,24 +376,27 @@ class DriveSatisfaction:
         base = max(self._sat_reflex_ema, 1e-6)
         return (self._sat_high_ema - self._sat_reflex_ema) / base
 
-    def lambda_gate(
-        self,
-        urgency: float = 0.0,
-        beta: float = 8.0,
-        threshold: float = 0.0,
-    ) -> float:
-        """由胜任度裁定 λ ∈ [0,1]
+    def competence_for(self, context) -> float:
+        """情境条件化胜任度：该感知情境下高层相对反射的净优势
 
-        λ = (1 − urgency) · σ(β · (competence − θ))
-
-        - 证据不足（样本 < min_samples）→ competence=0 → λ=σ(−βθ)，
-          θ=0 时为 0.5。**调用方应先用 shadow_mode 把 λ 压到 0**，
-          不要依赖 gate 自己兜底 —— 证据不足时任何非零 λ 都是冒险。
-        - 紧急 → λ→0，反射接管（等不到满足度回流的下一帧）
-        - 高层胜任 → λ→1
-        - 高层退步 → competence 下降，λ 自动回落（**接管可逆**）
+        证据不足（任一臂样本 < min_samples）时回退全局聚合值；
+        无任何账目时返回 0（保守，不允许接管）。
         """
-        z = beta * (self.competence - threshold)
+        e = self._ctx.get(context) if context is not None else None
+        if (e is None or e["n_high"] < self.min_samples
+                or e["n_reflex"] < self.min_samples):
+            return self.competence
+        base = max(e["sat_reflex"], 1e-6)
+        return (e["sat_high"] - e["sat_reflex"]) / base
+
+    def lambda_gate(self, urgency: float = 0.0, beta: float = 8.0,
+                    threshold: float = 0.0,
+                    context=None) -> float:
+        """由胜任度裁定 λ ∈ [0,1]（可按情境条件化）
+
+        λ = (1 − urgency) · σ(β · (competence(context) − θ))
+        """
+        z = beta * (self.competence_for(context) - threshold)
         sig = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, z))))
         return float((1.0 - max(0.0, min(1.0, urgency))) * sig)
 

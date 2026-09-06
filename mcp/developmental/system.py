@@ -63,6 +63,7 @@ class DevelopmentalSystem:
         spike_decay: float = 0.3,
         spike_refractory: int = 1,
         eprop: bool = False,
+        contextual_competence: bool = False,
     ):
         """
         Args:
@@ -241,6 +242,13 @@ class DevelopmentalSystem:
         self.saturation_split = saturation_split
         # T3: e-prop 资格迹（髓鞘链深度信用）——RPE 按 elig 分账
         self.eprop_enabled = bool(eprop)
+        # 感知建模护栏：competence 按感知情境（winner 簇）条件化，
+        # 好情境的控制权不被其他情境的失败连坐（T4 实测的修复）
+        self.contextual_competence = bool(contextual_competence)
+        self.higher_brain.contextual_competence = self.contextual_competence
+        # 影子开关的情境账本（contextual 模式下按情境独立毕业/收回）
+        self._shadow_ctx: dict = {}
+        self.higher_brain.contextual_competence = self.contextual_competence
         # 承载力预算随自回归误差伸缩（协同 E）
         self.adaptive_budget = adaptive_budget
         self.higher_brain.sheath_registry.adaptive_budget = adaptive_budget
@@ -431,7 +439,10 @@ class DevelopmentalSystem:
         if satisfaction is None:
             return
         self._pending_relief = float(satisfaction)
-        self.drive_sat.observe(float(satisfaction), self._last_controller)
+        ctx = (getattr(self, "_last_winner", None)
+               if self.contextual_competence else None)
+        self.drive_sat.observe(float(satisfaction), self._last_controller,
+                               context=ctx)
         # 咨询台账：按**输出来源**（器官级 provenance）分账记录满足度。
         # 与 reflex/higher 二分臂正交——同一来源可能出现在两臂里
         # （如反射工具的输出既可能在影子期也可能在接管期出现）。
@@ -449,12 +460,24 @@ class DevelopmentalSystem:
         # 控制权必须**可收回**：高层退步时退回影子模式，
         # 等它重新证明自己。这正是"接管可逆"的含义。
         if self.drive_sat.has_sufficient_evidence:
-            comp = self.drive_sat.competence
-            if self.shadow_mode and comp > self.takeover_threshold:
-                self.shadow_mode = False
-            elif (not self.shadow_mode
-                  and comp < -self.takeover_threshold):
-                self.shadow_mode = True      # 收回控制权
+            ctx_judged = ctx
+            if self.contextual_competence:
+                # 影子开关按情境维护（每情境独立毕业/收回）
+                comp = self.drive_sat.competence_for(ctx_judged)
+                proven = self.drive_sat.has_sufficient_for(ctx_judged)
+                cur = self._shadow_ctx.get(ctx_judged, True)
+                if proven and comp > self.takeover_threshold:
+                    self._shadow_ctx[ctx_judged] = False
+                elif proven and comp < -self.takeover_threshold:
+                    self._shadow_ctx[ctx_judged] = True
+                self.shadow_mode = self._shadow_ctx.get(ctx_judged, cur)
+            else:
+                comp = self.drive_sat.competence
+                if self.shadow_mode and comp > self.takeover_threshold:
+                    self.shadow_mode = False
+                elif (not self.shadow_mode
+                      and comp < -self.takeover_threshold):
+                    self.shadow_mode = True      # 收回控制权
 
     def _learn_from_relief(self, rpe, input_vec, output_vec, lr=None) -> int:
         """**第三因子**驱动的学习：ΔW = η · RPE · eligibility
@@ -668,6 +691,17 @@ class DevelopmentalSystem:
         # 注入紧急度：决定 λ 门控中反射 vs 高层的接管比例。
         # 紧急时等不到下一帧环境信号（无法做自回归裁定），反射直接接管。
         match_result["urgency"] = self.urgency
+        # 感知情境键：优先用世界显示信道的刺激类别（argmax）——
+        # winner 神经元在单神经元主导时恒定，不区分刺激（实测教训）；
+        # 无世界显示信道时退回 winner 簇。
+        if (self.contextual_competence and self.world_display_channel):
+            norm_now = self.normalizer.normalize(combined_input.data)
+            self._last_winner = self._channel_argmax(
+                norm_now, self.world_display_channel)
+            if self._last_winner is None:
+                self._last_winner = match_result.get("winner_id", -1)
+        else:
+            self._last_winner = match_result.get("winner_id", -1)
 
         # --- 影子模式：决定本步谁真正控制 ---
         #
@@ -683,9 +717,20 @@ class DevelopmentalSystem:
                 self.drive_sat.eps = float(self.explore_eps)
 
         self._exploring = False
-        if self.shadow_mode:
+        # 影子开关按情境维护：未证实的情境反射保底（安全约束），
+        # 已证实的情境高层掌权——全局 shadow 会把好情境连坐（T4 实测）
+        ctx_now = (getattr(self, "_last_winner", None)
+                   if self.contextual_competence else None)
+        shadow_now = (self._shadow_ctx.get(ctx_now, True)
+                      if self.contextual_competence else self.shadow_mode)
+        if shadow_now:
+            # 情境级证据饥饿会锁死影子模式（T4 实测）：未证实情境
+            # 保持高探索率 ε=0.1，已证实情境才降到背景率
+            suff = None
+            if self.contextual_competence and ctx_now is not None:
+                suff = self.drive_sat.has_sufficient_for(ctx_now)
             self._exploring = self.drive_sat.should_explore(
-                rng=getattr(self, "_rng", None))
+                rng=getattr(self, "_rng", None), sufficient=suff)
             self._last_controller = "higher" if self._exploring else "reflex"
         else:
             self._last_controller = "higher"

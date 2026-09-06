@@ -123,12 +123,14 @@ class BabbleHand(ReptilianFunction):
                                metadata={"source": "babble-hand"})}
 
 
-def build_brain(seed=0, autoreg_lr=0.05, **kw):
+def build_brain(seed=0, autoreg_lr=0.05, relief_gain=None, **kw):
     brain = DevelopmentalSystem(port_layout=PORT, decay_rate=0.01, **kw)
     brain.phase = "exploratory"
     brain.autoreg_lr = autoreg_lr
     brain.autoreg_lr_tau = 5000.0
     brain.autoreg_w_norm = 3.0
+    if relief_gain is not None:
+        brain.relief_gain = relief_gain   # 0 = 切断奖励对 W 通路的影响
     k = brain.reflex._kernel
     k.register("babble-vocal", BabbleVocal(seed))
     k.register("babble-hand", BabbleHand(seed))

@@ -399,8 +399,12 @@ class DefaultHigherBrain(HigherBrain):
         urgency = match_result.get("urgency", 0.0)
         ds = getattr(self, "drive_sat", None)
         if ds is not None:
+            # 感知建模护栏：competence 按感知情境条件化（T4 修复）
+            ctx = (match_result.get("winner_id", -1)
+                   if getattr(self, "contextual_competence", False) else None)
             lam = ds.lambda_gate(urgency, beta=self.lambda_beta,
-                                 threshold=self.lambda_threshold)
+                                 threshold=self.lambda_threshold,
+                                 context=ctx)
         else:
             lam = self.scheduler.lambda_gate(urgency)   # 退化路径
         self._last_lambda = lam
