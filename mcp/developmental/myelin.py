@@ -116,6 +116,15 @@ class MyelinSheath:
     # 上游通路因下游有用而在延迟裁定中保留资格。
     elig: float = 0.0
 
+    # --- 阈值张力张量（T8：标量资格迹的升维，绑定在髓鞘回路上）---
+    #
+    # T_j 是**逐维度负荷向量**（dst 信道各维上 |transmitted × residual|
+    # 的 EMA）：标量 elig 只说"这条通路有没有用"，张量 T 说"它压在
+    # 哪些维度上、压多重"。回路张力 = 神经元各汇入/汇出髓鞘的张力
+    # 范数和——高张力 = 承重墙（漂移受阈值治理、变异被回滚探针
+    # 甄别），低张力 = 隔墙（探索预算自由）。
+    tension: Optional[np.ndarray] = None
+
     # --- 新生儿豁免期（必需，非可选优化）---
     #
     # **为什么必须有**：新通路初始增益较低（见
@@ -1368,6 +1377,68 @@ class MyelinSheathRegistry:
                                   s.gain + lr * float(rpe) * s.elig))
             n += 1
         return n
+
+    # ---------- 阈值张力（T8） ----------
+
+    def update_tension(self, events, residual, layout, decay: float = 0.95) -> int:
+        """推进张力张量：T_j ← decay·T_j + |transmitted × residual|（逐维）
+
+        张力是**负荷**不是方向——取模长。无事件的髓鞘纯衰减。
+
+        Returns:
+            被更新的髓鞘数。
+        """
+        if residual is None:
+            return 0
+        rn = residual.detach().cpu().numpy() if hasattr(residual, "detach") \
+            else (residual.a if hasattr(residual, "a") else residual)
+        rn = np.asarray(rn, dtype=float).ravel()
+        # 全表先衰减（无事件的髓鞘纯衰减）
+        for s in self._sheaths.values():
+            if s.tension is not None:
+                s.tension = s.tension * decay
+        n = 0
+        for e in events:
+            key = e.sheath_key
+            if key is None or key not in self._sheaths:
+                continue
+            dc = key[3]
+            if layout is None or dc not in layout:
+                continue
+            off, size = layout[dc]
+            d = e.data.detach().cpu().numpy() if hasattr(e.data, "detach") \
+                else (e.data.a if hasattr(e.data, "a") else e.data)
+            d = np.asarray(d, dtype=float).ravel()
+            seg_d = d[off:off + size]
+            seg_r = rn[off:off + size]
+            if seg_d.size == 0:
+                continue
+            load = np.abs(seg_d * seg_r[:seg_d.size])
+            s = self._sheaths[key]
+            if s.tension is None or np.shape(s.tension) != load.shape:
+                s.tension = np.zeros(size)
+            s.tension = s.tension + load      # 全局衰减已做，此处只加负荷
+            n += 1
+        return n
+
+    def tension_load(self, nid: int) -> float:
+        """神经元的回路张力 = 各汇入/汇出髓鞘张量均值的和
+
+        高值 = 承重墙（漂移受抑制、变异被回滚甄别）；
+        低值 = 隔墙（探索预算自由）。
+        """
+        total, cnt = 0.0, 0
+        for (sn, sc, dn, dc), s in self._sheaths.items():
+            if sn == nid or dn == nid:
+                if s.tension is not None:
+                    t = s.tension
+                    if hasattr(t, "detach"):
+                        t = t.detach().cpu().numpy()
+                    elif hasattr(t, "a"):
+                        t = t.a
+                    total += float(np.abs(np.asarray(t, dtype=float)).mean())
+                    cnt += 1
+        return total / max(1, cnt)
 
     def capacity_report(self) -> dict:
         """容量诊断——监控"只有衰减、无硬约束"下的自适应预算是否发散

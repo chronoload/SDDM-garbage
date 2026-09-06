@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import numpy as np
 import torch
 from enum import Enum
 from typing import Any, Optional
@@ -64,6 +65,7 @@ class DevelopmentalSystem:
         spike_refractory: int = 1,
         eprop: bool = False,
         contextual_competence: bool = False,
+        drift_tension: bool = True,
     ):
         """
         Args:
@@ -248,6 +250,9 @@ class DevelopmentalSystem:
         self.higher_brain.contextual_competence = self.contextual_competence
         # 影子开关的情境账本（contextual 模式下按情境独立毕业/收回）
         self._shadow_ctx: dict = {}
+        # T8: 阈值张力——漂移受回路张力治理 + 变异回滚探针
+        self.drift_tension = bool(drift_tension)
+        self._last_target: Optional[object] = None
         self.higher_brain.contextual_competence = self.contextual_competence
         # 承载力预算随自回归误差伸缩（协同 E）
         self.adaptive_budget = adaptive_budget
@@ -421,6 +426,70 @@ class DevelopmentalSystem:
             return int(am.item()) if hasattr(am, "item") else int(am)
         except Exception:
             return None
+
+    def _probe_pred_err(self, neuron, input_vec, target_vec) -> Optional[float]:
+        """无副作用的预测残差探针：‖W·(gain·x) − t‖²（神经元局部序）"""
+        if neuron.W is None or not getattr(neuron, "unfolded", None):
+            return None
+        if input_vec is None or target_vec is None:
+            return None
+
+        def _np(x):
+            if hasattr(x, "detach"):
+                return np.asarray(x.detach().cpu().numpy(), dtype=float)
+            if hasattr(x, "a"):
+                return np.asarray(x.a, dtype=float)
+            return np.asarray(x, dtype=float)
+
+        xi = _np(input_vec)
+        tg = _np(target_vec)
+        idx = neuron._unfolded_indices()
+        if not idx or max(idx) >= xi.size:
+            return None
+        gains = []
+        for ch, s0, e0 in neuron._channel_bounds():
+            g = float(getattr(neuron.unfolded[ch], "gain", 1.0))
+            gains.extend([g] * (e0 - s0))
+        out = _np(neuron.W) @ (xi[idx] * np.asarray(gains))
+        return float(((out - tg[idx]) ** 2).sum())
+
+    def _apply_drift_governed(self, nid: int, neuron, rate: float) -> bool:
+        """T8 阈值张力治理的漂移：张力缩放 + 变异回滚探针
+
+        1. slack = 1/(1+回路张力)：承重墙几乎不漂，隔墙自由探索
+        2. 漂移后探针：预测残差恶化超容差（11%）→ W 回滚到漂移前
+
+        Returns:
+            是否发生了回滚。
+        """
+        if neuron.W is None or not neuron.alive:
+            return False
+        reg = self.higher_brain.sheath_registry
+        load = reg.tension_load(nid)
+        slack = 1.0 / (1.0 + load)
+        snapshot = None
+        err_pre = None
+        # 回滚探针只针对承重回路的恶化变异（张力 > θ_T）；低张力回路
+        # 的漂移是探索本身，一律放行——两器不打架：缩放治"在哪漂"，
+        # 回滚治"承重处不许坏"
+        load_bearing = load > getattr(self, "drift_tension_threshold", 0.5)
+        if load_bearing and self._prev_norm_input is not None \
+                and self._last_target is not None:
+            snapshot = np.asarray(
+                neuron.W.detach().cpu().numpy()
+                if hasattr(neuron.W, "detach") else neuron.W.a,
+                dtype=float).copy()
+            err_pre = self._probe_pred_err(
+                neuron, self._prev_norm_input, self._last_target)
+        neuron.drift(rate=rate * slack, rng=getattr(self, "_rng", None))
+        if err_pre is None or snapshot is None:
+            return False
+        err_post = self._probe_pred_err(
+            neuron, self._prev_norm_input, self._last_target)
+        if err_post > err_pre * 1.1 + 1e-6:
+            neuron.W = torch.as_tensor(snapshot)
+            return True
+        return False
 
     def report_drive_satisfaction(self, satisfaction: float) -> None:
         # fmt: off
@@ -598,10 +667,11 @@ class DevelopmentalSystem:
         # --- 通路级预测结算：世界已揭示当前帧 → 上一帧备案的各通路
         #     预测逐个对答案。信用只来自环境即时揭示（无标注、无反传），
         #     "被世界证实的通路才有发言权"。
+        norm_now = self.normalizer.normalize(combined_input.data)
+        self._last_target = norm_now     # 张力回滚探针的目标（x_next）
         if getattr(self, "world_display_channel", None):
             _actual = self._channel_argmax(
-                self.normalizer.normalize(combined_input.data),
-                self.world_display_channel,
+                norm_now, self.world_display_channel,
             )
             if _actual is not None:
                 self.higher_brain.settle_source_predictions(_actual)
@@ -861,6 +931,10 @@ class DevelopmentalSystem:
             if self.eprop_enabled and contributions:
                 self.higher_brain.sheath_registry.update_eligibility(
                     contributions)
+            # T8: 张力张量推进——逐维度负荷（承重墙的度量）
+            if self.drift_tension:
+                self.higher_brain.sheath_registry.update_tension(
+                    events, feedback.residual, self.port_layout)
             # 注意力键的局部学习：c_j · q（query 由 attention.modulate 缓存）。
             # 解耦：只动 attention 自己的键，W / 髓鞘 / 衰减一概不碰。
             if (self.higher_brain.attention is not None
@@ -907,8 +981,14 @@ class DevelopmentalSystem:
         # 受保护少漂移。于是同样的漂移预算从"均匀噪声"变成
         # "定向探索"——对无用者是机会，对有用者是保护。
         if self.drift_interval > 0 and self.step_count % self.drift_interval == 0:
-            for neuron in self.higher_brain.ecosystem.neurons.values():
-                neuron.drift(rate=self.drift_rate, rng=self._rng)
+            if self.drift_tension:
+                # T8: 阈值张力治理——张力缩放 + 回滚探针
+                for nid, neuron in self.higher_brain.ecosystem.neurons.items():
+                    self._apply_drift_governed(nid, neuron,
+                                               rate=self.drift_rate)
+            else:
+                for neuron in self.higher_brain.ecosystem.neurons.values():
+                    neuron.drift(rate=self.drift_rate, rng=self._rng)
 
         # 5.7 结构更新的时间尺度分离（协同 D）
         #
