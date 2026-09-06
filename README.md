@@ -2,7 +2,7 @@
 
 # [SHIT](./SHIT_zh.md)
 
-评述：我们对机器学习与人工智能的看法（[English](./SHIT.md)）。仓库名是故意的，内容是认真的。
+评述：我们对机器学习与人工智能的看法（[English](./SHIT.md)）。My Views on Machine Learning and Artificial Intelligence
 
 [English](./README_EN.md) | 中文
 
